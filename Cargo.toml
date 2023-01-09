@@ -8,3 +8,11 @@ edition = "2021"
 [dependencies]
 clap = { features = ["derive"], version = "4" }
 regex = "1.7"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "net",
+    "io-util",
+] }
+lazy_static = "1"
+itertools = "0.10"

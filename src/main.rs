@@ -1,11 +1,12 @@
-use std::{
-    io::{BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
-    thread,
-};
-
 use clap::Parser;
+use itertools::Itertools;
+use lazy_static::lazy_static;
 use regex::Regex;
+use std::{borrow::Cow, error::Error, net::SocketAddr};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+};
 
 #[derive(Parser)]
 struct Args {
@@ -14,71 +15,119 @@ struct Args {
     port: u16,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
     let s = format!("0.0.0.0:{}", args.port)
         .parse::<SocketAddr>()
         .unwrap();
     println!("Listening to {s}");
-    let listener = TcpListener::bind(s).unwrap();
-    for incoming in listener.incoming() {
-        match incoming {
-            Ok(incoming) => {
-                thread::spawn(|| proxy_hack(incoming));
-            }
+    let listener = TcpListener::bind(s).await?;
+    while let Ok((downstream, remote_addr)) = listener.accept().await {
+        tokio::spawn(handle_downstream(downstream, remote_addr));
+    }
+    Ok(())
+}
 
-            Err(e) => eprintln!("error {e}"),
-        }
+async fn handle_downstream(downstream: TcpStream, remote: SocketAddr) {
+    match do_handle_downstream(downstream, remote).await {
+        Ok(_) => println!("{remote} connection closed without error"),
+        Err(e) => println!("{remote} connection closed with error: {e}"),
     }
 }
 
-fn proxy_hack(mut downstream: TcpStream) {
-    let peer_addr = downstream.peer_addr().unwrap();
+async fn do_handle_downstream(
+    mut downstream: TcpStream,
+    remote: SocketAddr,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    format!("{remote} - incoming connection");
+    // connect to upstream
+    let mut upstream = TcpStream::connect("chat.protohackers.com:16963").await?;
+    format!("{remote} - connected to upstream");
 
-    println!("{peer_addr} - connected, connecting to upstream");
+    let (down_reader, mut down_writer) = downstream.split();
+    let (up_reader, mut up_writer) = upstream.split();
 
-    let upstream = TcpStream::connect("chat.protohackers.com:16963").unwrap();
+    let up_reader = BufReader::new(up_reader);
+    let down_reader = BufReader::new(down_reader);
 
-    let parsing_regex = Regex::new("7[1-9a-zA-Z]{25,35}").unwrap();
+    let mut up_lines = up_reader.lines();
+    let mut down_lines = down_reader.lines();
 
-    // forward anytinng sent by downstream to upstream
-    thread::spawn({
-        let mut upstream = upstream.try_clone().unwrap();
-        let mut downstream = downstream.try_clone().unwrap();
-        let peer_addr = peer_addr.clone();
-        move || {
-            println!("{peer_addr} - forwarding to upstream started!");
-            let mut buf = [0u8; 4096];
-            while let Ok(count) = downstream.read(&mut buf) {
-                if count == 0 {
-                    //EOF
-                    break;
-                }
-                if let Err(_) = upstream.write_all(&buf[0..count]) {
-                    // on error occured writting to upstream, close connection
-                    break;
+    loop {
+        tokio::select! {
+            up_line = up_lines.next_line() => {
+                let line = up_line?;
+                match line {
+                    Some(line) => {
+                        println!("{remote} - upstream received {line}");
+                        let line = replace(&line);
+                        down_writer.write_all(&line.as_bytes()).await?;
+                        down_writer.write_all(b"\n").await?;
+                },
+                    None => break
                 }
             }
-            println!("{peer_addr} - forwarding to upstream ended!");
-        }
-    });
-
-    // forward anything from upstream to downstream ; hacking BogusCoin addr
-    // to help parsing, act line by line
-
-    println!("{peer_addr} - forwarding to downstream started!");
-    let upstream = BufReader::new(upstream);
-    for line in upstream.lines() {
-        if let Ok(line) = line {
-            let line = parsing_regex
-                .replace_all(&line, "7YWHMfk9JZe0LM0g1ZauHuiSxhI")
-                .into_owned();
-            if let Err(_) = downstream.write_all(line.as_bytes()) {
-                break;
+            down_line = down_lines.next_line() => {
+                let line = down_line?;
+                match line {
+                    Some(line) => {
+                        println!("{remote} - downstream received {line}");
+                        let line = replace(&line);
+                        up_writer.write_all(&line.as_bytes()).await?;
+                        up_writer.write_all(b"\n").await?;
+                    },
+                    None => break
+                }
             }
-        } else {
-            break;
         }
     }
-    println!("{peer_addr} - forwarding to downstream ended!");
+
+    Ok(())
+}
+
+lazy_static! {
+    static ref REGEX: Regex = Regex::new("^7[0-9a-zA-Z]{25,34}$").unwrap();
+}
+
+fn replace(text: &str) -> String {
+    text.split(' ')
+        .map(|txt| REGEX.replace(txt, "7YWHMfk9JZe0LM0g1ZauHuiSxhI"))
+        .join(" ")
+}
+
+#[test]
+fn test() {
+    assert_eq!(replace("REGEX"), "REGEX");
+    assert_eq!(
+        replace("7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T"),
+        "7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T"
+    );
+
+    assert_eq!(
+        replace("7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T"),
+        "7YWHMfk9JZe0LM0g1ZauHuiSxhI"
+    );
+    assert_eq!(
+        replace(" 7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T"),
+        " 7YWHMfk9JZe0LM0g1ZauHuiSxhI"
+    );
+    assert_eq!(
+        replace(" 7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T "),
+        " 7YWHMfk9JZe0LM0g1ZauHuiSxhI "
+    );
+    assert_eq!(
+        replace("foo 7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T"),
+        "foo 7YWHMfk9JZe0LM0g1ZauHuiSxhI"
+    );
+    assert_eq!(
+        replace("7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T bar"),
+        "7YWHMfk9JZe0LM0g1ZauHuiSxhI bar"
+    );
+    assert_eq!(
+        replace("7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T 7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T"),
+        "7YWHMfk9JZe0LM0g1ZauHuiSxhI 7YWHMfk9JZe0LM0g1ZauHuiSxhI"
+    );
+    assert_eq!(replace("7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T 7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T 7adNeSwJkMakpEcln9HEtthSRtxdmEHOT8T"), 
+    "7YWHMfk9JZe0LM0g1ZauHuiSxhI 7YWHMfk9JZe0LM0g1ZauHuiSxhI 7YWHMfk9JZe0LM0g1ZauHuiSxhI");
 }
