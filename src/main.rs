@@ -2,11 +2,15 @@ use clap::Parser;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use regex::Regex;
-use std::{borrow::Cow, error::Error, net::SocketAddr};
+use std::{error::Error, net::SocketAddr};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
 };
+
+use crate::line_reader::LineReader;
+
+mod line_reader;
 
 #[derive(Parser)]
 struct Args {
@@ -49,10 +53,10 @@ async fn do_handle_downstream(
     let (up_reader, mut up_writer) = upstream.split();
 
     let up_reader = BufReader::new(up_reader);
-    let down_reader = BufReader::new(down_reader);
+    //let down_reader = BufReader::new(down_reader);
 
     let mut up_lines = up_reader.lines();
-    let mut down_lines = down_reader.lines();
+    let mut down_lines = LineReader::new(down_reader);
 
     loop {
         tokio::select! {
