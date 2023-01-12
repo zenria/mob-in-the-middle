@@ -2,15 +2,15 @@ use std::io;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
-pub struct LineReader<T: AsyncRead> {
-    reader: T,
-    buffer: Vec<u8>,
-}
 /// suboptimal (to say the least) implementation of an asynchronous line reader.
 ///
 /// It will not throw a new  line at EOF if the last char is not an `\n`
 ///
 /// DO NOT USE IT IN REAL LIFE
+pub struct LineReader<T: AsyncRead> {
+    reader: T,
+    buffer: Vec<u8>,
+}
 impl<T: AsyncRead + Unpin> LineReader<T> {
     pub fn new(reader: T) -> LineReader<T> {
         Self {
